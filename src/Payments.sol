@@ -1704,6 +1704,74 @@ contract Payments is
 
         return result;
     }
+
+    /**
+     * @notice Gets information about an account - when it would go into debt, total balance, available balance, and lockup rate.
+     * @param token The token address to get account info for.
+     * @param owner The address of the account owner.
+     * @return fundedUntilEpoch The epoch at which the account would go into debt given current lockup rate and balance.
+     * @return currentFunds The current funds in the account.
+     * @return availableFunds The funds available after accounting for simulated lockup.
+     * @return currentLockupRate The current lockup rate per epoch.
+     */
+    function getAccountInfoIfSettled(
+        address token,
+        address owner
+    ) external view returns (
+        uint256 fundedUntilEpoch,
+        uint256 currentFunds,
+        uint256 availableFunds,
+        uint256 currentLockupRate
+    ) {
+        Account storage account = accounts[token][owner];
+        
+        currentFunds = account.funds;
+        currentLockupRate = account.lockupRate;
+
+        uint256 currentEpoch = block.number;
+        uint256 elapsedTime = currentEpoch - account.lockupLastSettledAt;
+        uint256 simulatedLockupCurrent = account.lockupCurrent;
+
+        // Early return for simple cases: no elapsed time or no lockup rate
+        if (elapsedTime <= 0 || account.lockupRate == 0) {
+            availableFunds = account.funds > simulatedLockupCurrent ? 
+                account.funds - simulatedLockupCurrent : 0;
+            
+            // If no lockup rate, account never goes into debt
+            fundedUntilEpoch = account.lockupRate == 0 ? type(uint256).max : availableFunds == 0 ? account.lockupLastSettledAt : currentEpoch + (availableFunds / account.lockupRate);
+            
+            return (fundedUntilEpoch, currentFunds, availableFunds, currentLockupRate);
+        }
+
+        // Handle case where we need to calculate additional lockup
+        uint256 additionalLockup = account.lockupRate * elapsedTime;
+        
+        // If we have sufficient funds to cover the additional lockup
+        if (account.funds >= account.lockupCurrent + additionalLockup) {
+            simulatedLockupCurrent = account.lockupCurrent + additionalLockup;
+        } else {
+            // Calculate partial settlement
+            uint256 availableForLockup = account.funds - account.lockupCurrent;
+            if (availableForLockup > 0) {
+                // Calculate how many epochs we can fund with available funds
+                uint256 fractionalEpochs = availableForLockup / account.lockupRate;
+                simulatedLockupCurrent = account.lockupCurrent + (account.lockupRate * fractionalEpochs);
+            }
+        }
+
+        // Calculate available balance and fundedUntilEpoch
+        availableFunds = account.funds > simulatedLockupCurrent ? 
+            account.funds - simulatedLockupCurrent : 0;
+
+        if (availableFunds == 0) {
+            // Calculate when debt started based on how many epochs we could fund
+            uint256 fractionalEpochs = (simulatedLockupCurrent - account.lockupCurrent) / account.lockupRate;
+            fundedUntilEpoch = account.lockupLastSettledAt + fractionalEpochs;
+        } else {
+            uint256 epochsUntilDebt = availableFunds / account.lockupRate;
+            fundedUntilEpoch = currentEpoch + epochsUntilDebt;
+        }
+    }
 }
 
 function min(uint256 a, uint256 b) pure returns (uint256) {
