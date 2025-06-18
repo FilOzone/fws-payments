@@ -70,6 +70,7 @@ contract Payments is
         uint256 endEpoch; // Final epoch up to which the rail can be settled (0 if not terminated)
         // Operator commission rate in basis points (e.g., 100 BPS = 1%)
         uint256 commissionRateBps;
+        address serviceFeeRecipient; // address to collect operator comission
     }
 
     struct OperatorApproval {
@@ -104,6 +105,7 @@ contract Payments is
         uint256 endEpoch;
         // Operator commission rate in basis points (e.g., 100 BPS = 1%)
         uint256 commissionRateBps;
+        address serviceFeeRecipient; // address to collect operator commission
     }
 
     // token => client => operator => Approval
@@ -306,7 +308,8 @@ contract Payments is
                 lockupFixed: rail.lockupFixed,
                 settledUpTo: rail.settledUpTo,
                 endEpoch: rail.endEpoch,
-                commissionRateBps: rail.commissionRateBps
+                commissionRateBps: rail.commissionRateBps,
+                serviceFeeRecipient: rail.serviceFeeRecipient
             });
     }
 
@@ -510,6 +513,7 @@ contract Payments is
     /// @param to The recipient address for payments on this rail.
     /// @param arbiter Optional address of an arbiter contract (can be address(0) for no arbitration).
     /// @param commissionRateBps Optional operator commission in basis points (0-10000).
+    /// @param serviceFeeRecipient Address to receive operator commission
     /// @return The ID of the newly created rail.
     /// @custom:constraint Caller must be approved as an operator by the client (from address).
     function createRail(
@@ -517,7 +521,8 @@ contract Payments is
         address from,
         address to,
         address arbiter,
-        uint256 commissionRateBps
+        uint256 commissionRateBps,
+        address serviceFeeRecipient
     )
         external
         nonReentrant
@@ -538,6 +543,11 @@ contract Payments is
             commissionRateBps <= COMMISSION_MAX_BPS,
             "commission rate exceeds maximum"
         );
+        
+        require(
+            commissionRateBps == 0 || serviceFeeRecipient != address(0),
+            "non-zero commission requires service fee recipient"
+        );
 
         uint256 railId = _nextRailId++;
 
@@ -550,6 +560,7 @@ contract Payments is
         rail.settledUpTo = block.number;
         rail.endEpoch = 0;
         rail.commissionRateBps = commissionRateBps;
+        rail.serviceFeeRecipient = serviceFeeRecipient;
 
         // Record this rail in the payee's and payer's lists
         payeeRails[token][to].push(railId);
@@ -872,8 +883,17 @@ contract Payments is
 
         // Credit operator (if commission exists)
         if (operatorCommission > 0) {
-            Account storage operatorAccount = accounts[token][operator];
-            operatorAccount.funds += operatorCommission;
+            // Ensure the contract has enough funds to pay the operator commission
+            require(
+              IERC20(token).balanceOf(address(this)) >= operatorCommission,
+              "insufficient funds to pay operator commission"  
+            );
+
+            // Transfer operator commission to the operator
+            IERC20(token).safeTransfer(
+                operator,
+                operatorCommission
+            );
         }
 
         // Track platform fee
@@ -907,7 +927,7 @@ contract Payments is
             (uint256 netPayeeAmount, , ) = calculateAndPayFees(
                 oneTimePayment,
                 rail.token,
-                rail.operator,
+                rail.serviceFeeRecipient,
                 rail.commissionRateBps
             );
 
@@ -1397,7 +1417,7 @@ contract Payments is
         (netPayeeAmount, paymentFee, operatorCommission) = calculateAndPayFees(
             settledAmount,
             rail.token,
-            rail.operator,
+            rail.serviceFeeRecipient,
             rail.commissionRateBps
         );
 
